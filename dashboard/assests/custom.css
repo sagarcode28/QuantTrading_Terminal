@@ -1,0 +1,79 @@
+/* dashboard/assets/custom.css */
+@import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@300;400;600&display=swap');
+
+body {
+    font-family: 'Source Code Pro', monospace !important;
+    background-color: #050505; /* Deep minimal black */
+    color: #cccccc;
+    margin: 0;
+    padding: 0;
+}
+
+/* Minimalist Navbar */
+.navbar {
+    background-color: #050505 !important;
+    border-bottom: 1px solid #1f1f1f;
+    padding-bottom: 15px;
+}
+
+.navbar-brand {
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #ffffff !important;
+}
+
+/* Clean, flat tabs */
+.nav-tabs {
+    border-bottom: 1px solid #1f1f1f;
+    margin-bottom: 20px;
+}
+
+.nav-tabs .nav-link {
+    color: #666666;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-weight: 400;
+    padding: 10px 20px;
+    transition: all 0.3s ease;
+}
+
+.nav-tabs .nav-link:hover {
+    color: #aaaaaa;
+    border-color: transparent;
+}
+
+.nav-tabs .nav-link.active {
+    color: #00ffcc !important; /* Sharp terminal cyan/green */
+    background-color: transparent !important;
+    border: none !important;
+    border-bottom: 2px solid #00ffcc !important;
+}
+
+/* Stripped down cards for metrics */
+.card {
+    background-color: #0a0a0a !important;
+    border: 1px solid #1f1f1f !important;
+    border-radius: 2px !important;
+    box-shadow: none !important;
+}
+
+.card-body h6 {
+    color: #888888;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.card-body h3 {
+    margin-bottom: 0;
+    font-weight: 600;
+}
+
+/* Minimal inputs */
+.form-control, .Select-control {
+    background-color: #0a0a0a !important;
+    border: 1px solid #1f1f1f !important;
+    color: #ffffff !important;
+    font-family: 'Source Code Pro', monospace !important;
+    border-radius: 2px;
+}

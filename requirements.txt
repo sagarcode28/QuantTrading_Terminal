@@ -1,0 +1,15 @@
+# requirements.txt
+ccxt
+pandas
+numpy
+TA-Lib
+scikit-learn
+statsmodels
+requests
+websocket-client
+dash
+dash-bootstrap-components
+plotly
+python-telegram-bot
+SQLAlchemy
+python-dotenv
