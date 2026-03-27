@@ -20,6 +20,7 @@ from news_engine.analyzer import MarketSentiment
 from database.state_manager import StateManager
 
 class LiveExecutionEngine:
+
     def __init__(self):
         self.alerter = TelegramAlerter()
         self.generator = SignalGenerator()
@@ -49,7 +50,7 @@ class LiveExecutionEngine:
     async def fetch_latest_data(self, symbol: str) -> pd.DataFrame:
         """Fetches the latest candles and applies TA logic."""
         try:
-            # Fetch the last 200 candles to ensure EMAs (like 200 EMA) calculate correctly
+            # Fetch the last 200 candles to ensure EMAs calculate correctly
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -63,7 +64,6 @@ class LiveExecutionEngine:
 
     async def check_milestone(self):
         """Checks if the House Money milestone has been reached."""
-        # Use getattr to safely check config in case it wasn't added yet
         multiplier = getattr(config, 'HOUSE_MONEY_MULTIPLIER', 2.0)
         target = self.initial_capital * multiplier
         
@@ -79,67 +79,172 @@ class LiveExecutionEngine:
             print(f"\n[MILESTONE] {msg}\n")
             self.milestone_hit = True
 
+    def update_trailing_stops(self, symbol, current_price):
+        """
+        Dynamically adjusts the stop loss as the price moves in our favor.
+        """
+        position = self.open_positions[symbol]
+        direction = position.get('direction', 'LONG')
+        # Safely grab the entry price
+        entry_price = position.get('entry') 
+        current_sl = position['stop_loss']
+        
+        if 'peak_price' not in position:
+            position['peak_price'] = entry_price
+
+        updated = False
+
+        if direction == 'LONG':
+            if current_price > position['peak_price']:
+                position['peak_price'] = current_price
+            
+            profit_pct = (position['peak_price'] - entry_price) / entry_price
+            
+            if profit_pct >= config.TRAILING_ACTIVATION_PCT:
+                new_sl = position['peak_price'] * (1 - config.TRAILING_DISTANCE_PCT)
+                if new_sl > current_sl:
+                    self.open_positions[symbol]['stop_loss'] = new_sl
+                    updated = True
+                    print(f"🛡️ [RISK MGMT] {symbol} Trailing Stop moved UP to {new_sl:.4f}")
+
+        elif direction == 'SHORT':
+            if current_price < position['peak_price']:
+                position['peak_price'] = current_price
+            
+            profit_pct = (entry_price - position['peak_price']) / entry_price
+            
+            if profit_pct >= config.TRAILING_ACTIVATION_PCT:
+                new_sl = position['peak_price'] * (1 + config.TRAILING_DISTANCE_PCT)
+                if new_sl < current_sl:
+                    self.open_positions[symbol]['stop_loss'] = new_sl
+                    updated = True
+                    print(f"🛡️ [RISK MGMT] {symbol} Trailing Stop moved DOWN to {new_sl:.4f}")
+
+        if updated:
+            self.state_manager.update_positions(self.open_positions)
+
     async def run(self):
         print("\n🚀 Apex Live Execution Engine Started.")
         await self.alerter.send_alert("🤖 *Apex Terminal Online*\nLive Market Polling Initiated.")
         
         while True:
-            current_time = datetime.now(timezone.utc)
-            print(f"\n[{current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}] Polling Markets...")
-            
-            for symbol in config.SYMBOLS:
-                df = await self.fetch_latest_data(symbol)
+            try:
+                current_time = datetime.now(timezone.utc)
+                print(f"\n[{current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}] Polling Markets...")
                 
-                if df.empty or len(df) < 200:
+                # ==========================================
+                # 1. FETCH DATA FOR ALL COINS
+                # ==========================================
+                latest_data = {}
+                for symbol in config.SYMBOLS:
+                    df = await self.fetch_latest_data(symbol)
+                    if not df.empty and len(df) >= 200:
+                        latest_data[symbol] = df
+                
+                if not latest_data:
+                    print("⚠️ Network Timeout: Failed to fetch data. Retrying in 60 seconds.")
+                    await asyncio.sleep(60)
                     continue
-                
-                # Get the absolute most recent completed candle (index -2 to avoid unclosed current candle)
-                latest_candle = df.iloc[-2] 
-                
-                # Check for Signal
-                signal = self.generator.generate(
-                    symbol=symbol, 
-                    latest_data=latest_candle, 
-                    mtf_alignment=True, 
-                    candle_time=None # None forces Live Mode (News Engine active)
-                )
-                
-                if signal.get('status') == 'approved':
-                    # Prevent duplicate trades if we are already in one
-                    if symbol in self.open_positions:
-                        continue 
+
+                # ==========================================
+                # 2. POSITION MANAGEMENT (TRAILING STOPS & EXITS)
+                # ==========================================
+                for symbol in list(self.open_positions.keys()):
+                    if symbol not in latest_data:
+                        continue
                         
-                    entry = signal['entry']
-                    sl = signal['stop_loss']
-                    tp = signal['take_profit']
-                    direction = signal['direction']
+                    # Get the absolute current live price
+                    current_price = latest_data[symbol].iloc[-1]['close'] 
                     
-                    # Log the trade
-                    self.open_positions[symbol] = signal
+                    # Update trailing stops mathematically
+                    self.update_trailing_stops(symbol, current_price)
                     
-                    alert_msg = (
-                        f"⚡ **APEX EXECUTION ALERT** ⚡\n\n"
-                        f"**Asset:** {symbol}\n"
-                        f"**Action:** {direction}\n"
-                        f"**Entry:** ${entry}\n"
-                        f"**Stop Loss:** ${sl}\n"
-                        f"**Take Profit:** ${tp}\n"
-                        f"**Confidence:** {signal['confidence']}/100\n"
-                        f"**Mode:** {config.TRADING_MODE}"
+                    position = self.open_positions[symbol]
+                    direction = position.get('direction', 'LONG')
+                    
+                    exit_triggered = False
+                    exit_reason = ""
+                    
+                    # Check for Stop Loss or Take Profit
+                    if direction == 'LONG':
+                        if current_price <= position['stop_loss']:
+                            exit_triggered = True
+                            exit_reason = "🛑 STOP LOSS / TRAILING STOP HIT"
+                        elif current_price >= position['take_profit']:
+                            exit_triggered = True
+                            exit_reason = "🎯 TAKE PROFIT HIT"
+                            
+                    elif direction == 'SHORT':
+                        if current_price >= position['stop_loss']:
+                            exit_triggered = True
+                            exit_reason = "🛑 STOP LOSS / TRAILING STOP HIT"
+                        elif current_price <= position['take_profit']:
+                            exit_triggered = True
+                            exit_reason = "🎯 TAKE PROFIT HIT"
+
+                    # Execute the Exit
+                    if exit_triggered:
+                        print(f"[{current_time.strftime('%H:%M:%S')}] {exit_reason} for {symbol} at {current_price}")
+                        await self.alerter.send_alert(f"🔔 **TRADE CLOSED** 🔔\nAsset: {symbol}\nReason: {exit_reason}\nExit Price: ${current_price}")
+                        
+                        # Remove from local memory and sync to MongoDB
+                        del self.open_positions[symbol]
+                        self.state_manager.update_positions(self.open_positions)
+
+                # ==========================================
+                # 3. SCAN FOR NEW TRADE SETUPS
+                # ==========================================
+                for symbol in config.SYMBOLS:
+                    if symbol in self.open_positions or symbol not in latest_data:
+                        continue
+                        
+                    df = latest_data[symbol]
+                    # Get absolute most recent completed candle (index -2)
+                    latest_candle = df.iloc[-2] 
+                    
+                    # Run your original Signal Generator
+                    signal = self.generator.generate(
+                        symbol=symbol, 
+                        latest_data=latest_candle, 
+                        mtf_alignment=True, 
+                        candle_time=None 
                     )
                     
-                    print(f"✅ Executing {direction} on {symbol} at ${entry}")
-                    await self.alerter.send_alert(alert_msg)
-                    
-                    # NOTE: If TRADING_MODE == 'LIVE', you would place the ccxt.create_market_order() here
-            
-            # Check Portfolio Milestones
-            await self.check_milestone()
-            
-            # The heart of the 15-minute engine. Sleep for 15 minutes (900 seconds)
-            # We subtract a few seconds to ensure we hit the API right as the next candle closes.
-            print("💤 Cycle complete. Hibernating for 15 minutes...")
-            await asyncio.sleep(895) 
+                    if signal.get('status') == 'approved':
+                        entry = signal['entry']
+                        sl = signal['stop_loss']
+                        tp = signal['take_profit']
+                        direction = signal['direction']
+                        
+                        # Save the trade and sync to MongoDB Cloud
+                        self.open_positions[symbol] = signal
+                        self.state_manager.update_positions(self.open_positions)
+                        
+                        alert_msg = (
+                            f"⚡ **APEX EXECUTION ALERT** ⚡\n\n"
+                            f"**Asset:** {symbol}\n"
+                            f"**Action:** {direction}\n"
+                            f"**Entry:** ${entry}\n"
+                            f"**Stop Loss:** ${sl}\n"
+                            f"**Take Profit:** ${tp}\n"
+                            f"**Confidence:** {signal['confidence']}/100\n"
+                            f"**Mode:** {config.TRADING_MODE}"
+                        )
+                        print(f"✅ Executing {direction} on {symbol} at ${entry}")
+                        await self.alerter.send_alert(alert_msg)
+
+                # Check Milestones
+                await self.check_milestone()
+                
+                # Sleep for 15 minutes
+                print("💤 Cycle complete. Hibernating for 15 minutes...")
+                await asyncio.sleep(895) 
+                
+            except Exception as e:
+                error_msg = f"⚠️ [CRITICAL ERROR] Execution Loop Exception: {e}"
+                print(error_msg)
+                print("🔄 Auto-recovering. Restarting loop in 60 seconds...")
+                await asyncio.sleep(60)
 
 # --- DUMMY WEB SERVER FOR RENDER ---
 app = Flask(__name__)

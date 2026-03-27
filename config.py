@@ -32,6 +32,10 @@ class Config:
     PAPER_TRADING_BALANCE = 10000.0  # USDT
     RISK_PER_TRADE_PCT = 0.01        # 1% risk per trade
     MAX_TRADES_PER_DAY = 5
+
+    # --- RISK MANAGEMENT UPGRADES ---
+    TRAILING_ACTIVATION_PCT = 0.015  # Start trailing once trade is 1.5% in profit
+    TRAILING_DISTANCE_PCT = 0.01     # Trail the peak price by 1.0%
     
     # --- Optimized Strategy Parameters ---
     MIN_CONFIDENCE_SCORE = 60        # Lowered from 70 to capture more valid SMC setups
