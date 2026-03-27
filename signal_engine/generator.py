@@ -14,7 +14,8 @@ class SignalGenerator:
         self.daily_signals_generated = 0
         self.last_reset_date = pd.Timestamp('2000-01-01').date()
 
-    def generate(self, symbol: str, latest_data: pd.Series, mtf_alignment: bool, rr_ratio: float = config.DEFAULT_RR_RATIO, min_confidence: int = config.MIN_CONFIDENCE_SCORE, candle_time=None) -> dict:
+    # V2 UPGRADE: Added 'macro_data' to the function parameters
+    def generate(self, symbol: str, latest_data: pd.Series, macro_data: pd.Series = None, mtf_alignment: bool = True, rr_ratio: float = config.DEFAULT_RR_RATIO, min_confidence: int = config.MIN_CONFIDENCE_SCORE, candle_time=None) -> dict:
         
         current_time = pd.to_datetime(candle_time) if candle_time else datetime.utcnow()
         current_date = current_time.date()
@@ -26,7 +27,7 @@ class SignalGenerator:
         if self.daily_signals_generated >= config.MAX_TRADES_PER_DAY:
             return {'status': 'rejected', 'reason': 'Daily limit reached'}
 
-        # Calculate Technical Confluence
+        # Calculate Technical Confluence (Using the 15m chart)
         evaluation = ConfluenceScorer.calculate_score(latest_data)
         score = evaluation['score']
         direction = evaluation['direction']
@@ -34,28 +35,40 @@ class SignalGenerator:
         if score < min_confidence:
             return {'status': 'rejected', 'reason': f'Low confidence: {score}'}
         
-        if not mtf_alignment:
-            return {'status': 'rejected', 'reason': 'MTF 4H/1H/15m mismatch'}
-
         if direction == 'neutral':
             return {'status': 'rejected', 'reason': 'No directional bias'}
 
         # =========================================================
-        # --- NEW: ANTI-EXHAUSTION FILTERS ---
+        # --- NEW V2: MULTI-TIMEFRAME MACRO ALIGNMENT ---
+        # =========================================================
+        # We now check the 1-Hour chart to ensure the macro trend supports the 15m signal.
+        if mtf_alignment and macro_data is not None:
+            macro_close = macro_data['close']
+            macro_ema_200 = macro_data.get('ema_200', macro_close)
+            
+            # If the 15m signal says LONG, but the 1H chart is trading below its 200 EMA, VETO.
+            if direction == 'long' and macro_close < macro_ema_200:
+                return {'status': 'rejected', 'reason': 'MTF Veto: 1H Macro Trend is Bearish'}
+                
+            # If the 15m signal says SHORT, but the 1H chart is trading above its 200 EMA, VETO.
+            if direction == 'short' and macro_close > macro_ema_200:
+                return {'status': 'rejected', 'reason': 'MTF Veto: 1H Macro Trend is Bullish'}
+
+        # =========================================================
+        # --- ANTI-EXHAUSTION FILTERS (15m Chart) ---
         # =========================================================
         entry_price = latest_data['close']
         ema_20 = latest_data.get('ema_20', entry_price)
         ema_200 = latest_data.get('ema_200', entry_price)
         atr = latest_data.get('atr_14', entry_price * 0.01)
 
-        # 1. Macro Trend Alignment (Only trade with the 200 EMA flow)
+        # 1. Local Trend Alignment (15m)
         if direction == 'long' and entry_price < ema_200:
-            return {'status': 'rejected', 'reason': 'Counter Macro Trend (Below 200 EMA)'}
+            return {'status': 'rejected', 'reason': 'Counter Local Trend (Below 15m 200 EMA)'}
         if direction == 'short' and entry_price > ema_200:
-            return {'status': 'rejected', 'reason': 'Counter Macro Trend (Above 200 EMA)'}
+            return {'status': 'rejected', 'reason': 'Counter Local Trend (Above 15m 200 EMA)'}
 
         # 2. Rubber Band Rule (Prevent entering overextended moves)
-        # If price is more than 1.5 ATRs away from the 20 EMA, it is too late to enter safely.
         dist_from_ema20 = abs(entry_price - ema_20)
         if dist_from_ema20 > (atr * 1.5):
             return {'status': 'rejected', 'reason': 'Price Overextended (Mean Reversion Risk)'}

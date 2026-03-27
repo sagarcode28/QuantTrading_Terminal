@@ -47,20 +47,27 @@ class LiveExecutionEngine:
         self.open_positions = state.get('open_positions', {})
         self.milestone_hit = state.get('milestone_hit', False)
 
-    async def fetch_latest_data(self, symbol: str) -> pd.DataFrame:
-        """Fetches the latest candles and applies TA logic."""
+    async def fetch_latest_data(self, symbol: str) -> dict:
+        """Fetches both execution (15m) and macro (1h) timeframes."""
         try:
-            # Fetch the last 200 candles to ensure EMAs calculate correctly
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            # 1. Fetch Execution Timeframe (15m)
+            ohlcv_15m = self.exchange.fetch_ohlcv(symbol, timeframe='15m', limit=200)
+            df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df_15m['timestamp'] = pd.to_datetime(df_15m['timestamp'], unit='ms')
+            df_15m = TAEngine.apply_all(df_15m)
+
+            # 2. Fetch Macro Timeframe (1h)
+            ohlcv_1h = self.exchange.fetch_ohlcv(symbol, timeframe='1h', limit=200)
+            df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df_1h['timestamp'] = pd.to_datetime(df_1h['timestamp'], unit='ms')
+            df_1h = TAEngine.apply_all(df_1h) # Calculates 1H EMAs!
+
+            # Return both dataframes as a dictionary
+            return {'15m': df_15m, '1h': df_1h}
             
-            # Apply all technical indicators
-            df = TAEngine.apply_all(df)
-            return df
         except Exception as e:
-            print(f"⚠️ Error fetching data for {symbol}: {e}")
-            return pd.DataFrame()
+            print(f"⚠️ Error fetching MTF data for {symbol}: {e}")
+            return {}
 
     async def check_milestone(self):
         """Checks if the House Money milestone has been reached."""
@@ -137,9 +144,9 @@ class LiveExecutionEngine:
                 # ==========================================
                 latest_data = {}
                 for symbol in config.SYMBOLS:
-                    df = await self.fetch_latest_data(symbol)
-                    if not df.empty and len(df) >= 200:
-                        latest_data[symbol] = df
+                    data_dict = await self.fetch_latest_data(symbol)
+                    if data_dict and not data_dict['15m'].empty:
+                        latest_data[symbol] = data_dict
                 
                 if not latest_data:
                     print("⚠️ Network Timeout: Failed to fetch data. Retrying in 60 seconds.")
@@ -154,7 +161,8 @@ class LiveExecutionEngine:
                         continue
                         
                     # Get the absolute current live price
-                    current_price = latest_data[symbol].iloc[-1]['close'] 
+                    # Get the absolute current live price from the 15m chart
+                    current_price = latest_data[symbol]['15m'].iloc[-1]['close']
                     
                     # Update trailing stops mathematically
                     self.update_trailing_stops(symbol, current_price)
@@ -198,14 +206,15 @@ class LiveExecutionEngine:
                     if symbol in self.open_positions or symbol not in latest_data:
                         continue
                         
-                    df = latest_data[symbol]
-                    # Get absolute most recent completed candle (index -2)
-                    latest_candle = df.iloc[-2] 
+                    # Extract the closed candles for both timeframes
+                    latest_candle_15m = latest_data[symbol]['15m'].iloc[-2] 
+                    latest_candle_1h = latest_data[symbol]['1h'].iloc[-2] 
                     
-                    # Run your original Signal Generator
+                    # Run your upgraded Signal Generator
                     signal = self.generator.generate(
                         symbol=symbol, 
-                        latest_data=latest_candle, 
+                        latest_data=latest_candle_15m, 
+                        macro_data=latest_candle_1h,  # <--- NEW MTF PARAMETER ADDED
                         mtf_alignment=True, 
                         candle_time=None 
                     )
